@@ -1,4 +1,4 @@
-"""Dense Melee Harness-lite (vectorized numpy).
+"""Dense melee numpy harness (vectorized numpy).
 
 Measures the SERVER-SIDE work of a dense 100v100 melee brawl, per tick, end to end:
   input recv (loopback UDP) -> movement + crowd contacts -> history ring ->
@@ -14,7 +14,7 @@ What the numbers mean
   * Correctness is checked against a slow exhaustive double-precision oracle every tick
     (suite `verify`), including historical (rewound) broad phase and snapshot decode.
 
-Run from the project root:
+Run from the repository root:
   python part1/numpy-harness/dense_melee_bench.py verify
   python part1/numpy-harness/dense_melee_bench.py all
 Writes <suite>_results.md / .json beside this file. Fixed seeds; standard library + numpy only.
@@ -897,7 +897,7 @@ def main():
         print(s, flush=True)
         lines.append(s)
 
-    emit(f"# Dense Melee Harness-lite — suite `{suite}`\n")
+    emit(f"# Dense melee numpy harness — suite `{suite}`\n")
     emit(f"- CPU: {platform.processor()} · Python {platform.python_version()} · numpy {np.__version__} · {pin}")
     emit("- Single thread. Every stage is batched numpy driven by the interpreter: treat all ms as an upper bound.\n")
 

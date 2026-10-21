@@ -11,7 +11,7 @@ A **replica** is one process holding two ordinary NfE worlds:
 
 Nothing in the package is forked. The replica binds one tick offset between its two worlds, forwards its clients' commands up to the authority, and measures its own hop to the authority so it can lead commands by that amount. A native relay process sits on each edge so that round-trip time, jitter and loss can be injected per hop.
 
-Every walker ghost carries a per-entity seal stamped by the authority each tick (id, tick, quantised position) and checked again at the replica and at the end client.
+Every crowd ghost carries a per-entity seal stamped by the authority each tick (id, tick, quantised position) and checked again at the replica and at the end client.
 
 ## 2. What was measured
 
@@ -48,7 +48,7 @@ NfE keeps, for every connection and ghost chunk, a ring of past snapshots so the
 per connection ≈ ghosts × history × (8 + snapshot bytes per ghost)
 ```
 
-With the fixture's walker ghost that predicts about 39 MB per connection at 10,000 ghosts and 32 history entries. The measured slope across 20 to 100 connections was within a few percent of that. The consequence is the formula itself: 400 connections at 10,000 ghosts is over 15 GB of history alone.
+With the harness's crowd ghost that predicts about 39 MB per connection at 10,000 ghosts and 32 history entries. The measured slope across 20 to 100 connections was within a few percent of that. The consequence is the formula itself: 400 connections at 10,000 ghosts is over 15 GB of history alone.
 
 Cutting the history to 6 entries divides the memory by five but covers only about 200 ms at 30 Hz, and a client whose whole history is unacknowledged stops receiving those chunks. The define trades memory for a cliff in round-trip time, confirmed with a control run at 250 ms.
 

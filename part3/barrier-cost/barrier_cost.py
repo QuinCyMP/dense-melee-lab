@@ -1,12 +1,12 @@
-"""Dense-battle R7c + R7f: what a per-tick barrier exchange between D deciders costs in real processes.
+"""Barrier-cost study: what a per-tick barrier exchange between D deciders costs in real processes.
 
-Question (docs/part3-many-deciders.md, R7c and R7f): R7d showed that D deciders equal one
+Question (docs/part3-many-deciders.md, the barrier-cost study and the crossover question): the equivalence study showed that D deciders equal one
 decider only with a boundary exchange inside every tick, a >= 3 m crowd halo and canonical ordering of the hits on one
 target -- but ran the deciders in lock-step inside ONE process, so the barrier cost was not measured. Here every decider is
 its own OS process (multiprocessing, spawn), the exchange goes through shared memory mailboxes, the barrier is a spin
 barrier on shared-memory counters, and the per-tick clock is split into compute / exchange / barrier wait / sequencer.
 
-The simulation is r7d_replay.py's, imported unchanged (World, crowd, sweep, the recorded trace, the single-decider
+The simulation is replay_deciders.py's, imported unchanged (World, crowd, sweep, the recorded trace, the single-decider
 reference and diff_hits): same disc at 1 person/m2, 30 Hz, same bands (circle_S: cuts on y at equal start population),
 crowd = 4 Jacobi iterations of 0.7 m discs, sector hit test, 120 damage, HP 4000, overkill drop. Only the exchange is new.
 
@@ -15,8 +15,8 @@ Tick of decider d (two barriers; three/four with --seq central):
   2  PUBLISH 1  moved positions of its bodies that lie within the halo (default 3 m) of a neighbour's band (id, x, y), and the
      full state (position, swing start, yaw, hp, dedupe keys) of bodies that crossed into the neighbour's band last tick
   ---- barrier 1 ----
-  3  READ 1, CROWD on owned + halo copies (the r7d rule), PUBLISH 2  snapshots of the active attackers that stand within
-     5.5 m of a neighbour's band (forward-to-owner, R7b at delay 0)
+  3  READ 1, CROWD on owned + halo copies (the equivalence rule), PUBLISH 2  snapshots of the active attackers that stand within
+     5.5 m of a neighbour's band (forward-to-owner, forward-to-owner at delay 0)
   ---- barrier 2 ----
   4  READ 2, sweep: every attacker (own + snapshots) against the bodies this decider owns; per-pair dedupe; the hits on one
      target are ordered by (swing tick, attacker id) and the first ceil(HP/120) count (the SEQUENCER step, timed on its own);
@@ -24,16 +24,16 @@ Tick of decider d (two barriers; three/four with --seq central):
   --seq central: after the sweep every decider sends all hits on targets that took a cross hit to decider 0, which ranks
      them (the central sequencer), barrier 3 / barrier 4 around it.
 
-Ownership: a body is owned by the band it stands in at the start of the tick (r7d). The decider that owned it last tick
+Ownership: a body is owned by the band it stands in at the start of the tick (equivalence). The decider that owned it last tick
 still holds its state at the start of this tick, so it does the (state-only) move, then hands it over in PUBLISH 1.
 
 Measured per tick and decider (ms): compute, exchange (pack + unpack of mailboxes), barrier wait, sequencer; bytes written
-(payload only). Equivalence is checked every tick against the single-decider reference of r7d (positions and HP of every body bit
+(payload only). Equivalence is checked every tick against the single-decider reference of equivalence (positions and HP of every body bit
 for bit, every applied hit, death ticks); the check is NOT inside the clocks.
 
-    python r7c_barrier.py --n 2000 --deciders 1,2 --ticks 1200
-    python r7c_barrier.py --empty            # latency of exchange + barrier with an empty simulation
-    python r7c_barrier.py --summarize
+    python barrier_cost.py --n 2000 --deciders 1,2 --ticks 1200
+    python barrier_cost.py --empty            # latency of exchange + barrier with an empty simulation
+    python barrier_cost.py --summarize
 """
 import sys
 sys.dont_write_bytecode = True
@@ -51,17 +51,17 @@ import time
 from datetime import datetime, timezone
 
 OUT = Path(__file__).resolve().parent
-R7D = OUT.parent / 'r7d'
-sys.path.insert(0, str(R7D))
+EQ = OUT.parent / 'equivalence'
+sys.path.insert(0, str(EQ))
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 os.environ.setdefault('MKL_NUM_THREADS', '1')
 
 import numpy as np                      # noqa: E402
-import r7d_replay as b                  # noqa: E402
+import replay_deciders as b                  # noqa: E402
 
 RAW = OUT / 'raw'
-CACHE = Path(tempfile.gettempdir()) / 'r7c_cache'
+CACHE = Path(tempfile.gettempdir()) / 'barrier_cost_cache'
 pc = time.perf_counter_ns
 
 H1 = np.dtype([('id', '<i4'), ('x', '<f8'), ('y', '<f8')])                                            # 20 B halo row
@@ -790,7 +790,7 @@ VARIANT_SPECS = [('merge', 3.0, True, 'global'), ('central', 3.0, True, 'global'
 
 
 def feed_bench(N, D, iters=3000):
-    """R7c second half: merging the D owned arrays into one state feed (24 B per body) is a scatter; timed in one process"""
+    """the barrier-cost study second half: merging the D owned arrays into one state feed (24 B per body) is a scatter; timed in one process"""
     rec = np.dtype([('id', '<i4'), ('x', '<f8'), ('y', '<f8'), ('hp', '<i4')])
     rng = np.random.default_rng(7)
     world = b.World(N, 'front')

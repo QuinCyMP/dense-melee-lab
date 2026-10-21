@@ -1,12 +1,12 @@
-"""Dense-battle R7d: does a fight decided by D deciders give the same outcome as one decider on the same input trace?
+"""Equivalence study: does a fight decided by D deciders give the same outcome as one decider on the same input trace?
 
-Question (docs/part3-many-deciders.md, R7d): replay one recorded input trace through
+Question (docs/part3-many-deciders.md, equivalence study): replay one recorded input trace through
 1 and D deciders, diff every tick; pass line: divergence 0 on hits, HP, positions (or an accepted bound).
 
 What is simulated (a self-contained, trace-driven simplification of part1/numpy-harness -- see the
 "Simplifications" list in docs/part3-many-deciders.md):
   world      the fixture's disc at ~1 person/m2, team = id & 1, 'front' layout (team 0 on x < 0, team 1 on x > 0) or the
-             R7 probe's 'mixed' layout; same seed and generator as r7_partition_probe.py / dense_melee_bench.py
+             'mixed' layout; same seed and generator as part1/numpy-harness/dense_melee_bench.py
   tick       30 Hz. input -> move (4 m/s idle, 1.5 m/s while swinging) -> crowd push (4 Jacobi iterations, 0.7 m
              discs, disc walls: the fixture's stage_move) -> swing hit resolution -> damage (120 per hit, HP 4000)
   swing      15 ticks (6 windup, 4 active, 5 recover) as the fixture; during the 4 active ticks every living enemy
@@ -19,7 +19,7 @@ What is simulated (a self-contained, trace-driven simplification of part1/numpy-
              zigzag segments of 20-90 ticks); the swing intent is recorded from the single-decider run (nearest
              enemy within 2.5 m and inside the 120 deg arc of the current facing, then snap the yaw to it and hold
              it for the swing). Replays apply the same trace whatever the state: the targets are never named.
-  deciders   the best R7a rule (docs/part3-many-deciders.md): circle_S = bands across the front line (cuts on y at equal
+  deciders   the best the partition study rule (docs/part3-many-deciders.md): circle_S = bands across the front line (cuts on y at equal
              population of the start positions), a body is owned by the band it stands in at the start of the
              tick, each decider is a circle around its band (half-diagonal + 3 m) that holds read copies.
              The target's decider resolves an interaction, else the attacker's, else any circle holding both
@@ -31,7 +31,7 @@ Boundary exchange (relay delay d, in ticks; d = 0 is a barrier inside the tick):
              of the band (the 4 crowd iterations reach 4 x 0.7 m = 2.8 m) -- at d = 0 this reproduces the single
              decider bit for bit, which is checked, not assumed.
   hits       cross-decider swing = attacker and target owned by different deciders.
-             owner-stale   forward-to-owner (R7b): the attacker's state travels d ticks; the target's decider tests
+             owner-stale   forward-to-owner (forward-to-owner): the attacker's state travels d ticks; the target's decider tests
                            it against the target's pose at arrival (no rewind) and applies the hit on arrival.
              owner-rewind  forward-to-owner + lag compensation: the target's decider tests the attacker's state
                            against the target's pose of the swing tick (its own history) and applies on arrival.
@@ -46,13 +46,13 @@ Boundary exchange (relay delay d, in ticks; d = 0 is a barrier inside the tick):
              one decider and D deciders agree).
 
 Run from anywhere:
-    python r7d_replay.py --n 2000 --deciders 1,2,4,8 --delay 0,1,2
-    python r7d_replay.py --n 10000 --deciders 1,2,4 --delay 0,1
-    python r7d_replay.py --n 2000 --deciders 2,4,8 --delay 0,1,2 --variants owner-stale-seq-p0,owner-stale-seq-h0
-    python r7d_replay.py --summarize
+    python replay_deciders.py --n 2000 --deciders 1,2,4,8 --delay 0,1,2
+    python replay_deciders.py --n 10000 --deciders 1,2,4 --delay 0,1
+    python replay_deciders.py --n 2000 --deciders 2,4,8 --delay 0,1,2 --variants owner-stale-seq-p0,owner-stale-seq-h0
+    python replay_deciders.py --summarize
 Variant name = <mode>-<pose>-<order>[-uni][-p0][-h0]; p0: position exchange exact (only the hit relay delayed),
 h0: hit relay exact (only position copies delayed), uni: latency L = delay. mode owner|naive, pose stale|rewind
-(naive ignores it), order seq|arr. Reference arrays and traces are cached in --cache (default <tmp>/r7d_cache).
+(naive ignores it), order seq|arr. Reference arrays and traces are cached in --cache (default <tmp>/equivalence_cache).
 """
 from pathlib import Path
 import argparse
@@ -72,7 +72,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 OUT = Path(__file__).resolve().parent
-RAW = Path(os.environ.get('R7D_RAW', OUT / 'raw'))
+RAW = Path(os.environ.get('EQUIV_RAW', OUT / 'raw'))
 
 DT = 1.0 / 30.0
 WINDUP, ACTIVE, RECOVER = 6, 4, 5
@@ -698,7 +698,7 @@ DEFAULT_VARIANTS = 'owner-stale-seq,owner-stale-arr,owner-rewind-seq,naive-seq,n
 def set_raw(path):
     global RAW
     RAW = Path(path)
-    os.environ['R7D_RAW'] = str(RAW)
+    os.environ['EQUIV_RAW'] = str(RAW)
 
 
 def harness_running():
@@ -719,7 +719,7 @@ def main():
     ap.add_argument('--delay', default='0,1,2')
     ap.add_argument('--variants', default=DEFAULT_VARIANTS)
     ap.add_argument('--procs', type=int, default=4)
-    ap.add_argument('--cache', default=str(Path(tempfile.gettempdir()) / 'r7d_cache'))
+    ap.add_argument('--cache', default=str(Path(tempfile.gettempdir()) / 'equivalence_cache'))
     ap.add_argument('--force', action='store_true')
     ap.add_argument('--perturb-k', type=int, default=1, help='number of 1-micrometre perturbation controls when the variant list has `perturb`')
     ap.add_argument('--raw', default=str(RAW), help='directory for the per-configuration JSON')

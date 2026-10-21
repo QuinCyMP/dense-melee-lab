@@ -25,8 +25,8 @@ The Part 3 fixtures need only Python 3.12, numpy and scipy. No game engine.
 
 ```bash
 pip install numpy scipy
-python part3/r7d/r7d_replay.py --n 2000 --deciders 1,2,4,8 --delay 0,1,2
-python part3/r7d/r7d_replay.py --summarize
+python part3/equivalence/replay_deciders.py --n 2000 --deciders 1,2,4,8 --delay 0,1,2
+python part3/equivalence/replay_deciders.py --summarize
 ```
 
 This replays one recorded fight through 1, 2, 4 and 8 deciders and diffs every tick. The summary prints the equivalence line (expect 0 / 0 / 0 at delay 0) and the damage at delay 1 and 2. Each configuration takes seconds at N = 2,000 and about a minute at N = 10,000.
@@ -34,8 +34,8 @@ This replays one recorded fight through 1, 2, 4 and 8 deciders and diffs every t
 To measure what the barrier costs in real processes:
 
 ```bash
-python part3/r7c/r7c_barrier.py --n 2000,10000 --deciders 1,2,4,8
-python part3/r7c/r7c_barrier.py --summarize
+python part3/barrier-cost/barrier_cost.py --n 2000,10000 --deciders 1,2,4,8
+python part3/barrier-cost/barrier_cost.py --summarize
 ```
 
 The Part 1 numpy harness runs the whole 200-player pipeline, including loopback UDP, and checks itself against the oracle:
@@ -54,8 +54,8 @@ part1/
 part2/
   memory-model/      Netcode for Entities snapshot-history memory, predicted from the package source and compared
 part3/
-  r7d/               replay one fight through D deciders, diff every tick (equivalence fixture)
-  r7c/               the same simulation in D OS processes with shared-memory mailboxes and a spin barrier (cost fixture)
+  equivalence/       replay one fight through D deciders, diff every tick (equivalence fixture)
+  barrier-cost/      the same simulation in D OS processes with shared-memory mailboxes and a spin barrier (cost fixture)
 docs/
   part1-single-decider.md   part2-replica-tier.md   part3-many-deciders.md
   related-work.md           methodology.md

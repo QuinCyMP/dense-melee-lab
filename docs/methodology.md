@@ -31,7 +31,7 @@ A pass line was written before each experiment. Results are reported against it,
 
 ## What is withheld, and why
 
-The complete result tables, the raw JSON of several hundred runs, the Unity harness and builds behind Part 2, and the project's measurement log are not published. They belong to a game project that is not announced. The fixtures in this repository regenerate the Part 1 and Part 3 numbers; Part 2 is reported at headline precision only. If you reproduce a figure that disagrees with a headline here, open an issue with your run file.
+The complete result tables, the raw JSON of several hundred runs, the Unity harness and builds behind Part 2, and the internal measurement log are not published. They belong to a game project that is not announced. The fixtures in this repository regenerate the Part 1 and Part 3 numbers; Part 2 is reported at headline precision only. If you reproduce a figure that disagrees with a headline here, open an issue with your run file.
 
 ## Hardware
 

@@ -6,7 +6,7 @@ The most useful contribution is a reproduction. Run a fixture on your hardware, 
 
 - Results never overwrite. New runs get new names. Keep failures.
 - Every run file keeps the script hash the fixture writes. Do not edit run files by hand.
-- Changes to a fixture's simulation (`r7d_replay.py` world, crowd, sweep, trace) change every downstream number; say so in the pull request and rerun the equivalence check.
+- Changes to a fixture's simulation (`replay_deciders.py` world, crowd, sweep, trace) change every downstream number; say so in the pull request and rerun the equivalence check.
 - Do not add a game engine dependency to Part 3. Its value is that it runs on numpy alone.
 - No third-party code without a licence line in the pull request.
 

@@ -1,7 +1,7 @@
-"""Dense-battle R5: per-connection snapshot-history memory of Netcode for Entities, predicted from the package source
-and compared with the skeleton's measurements; plus the shared-baseline alternative.
+"""Snapshot-history memory model: per-connection snapshot-history memory of Netcode for Entities, predicted from
+the package source and compared with the Part 2 measurements; plus the shared-baseline alternative.
 
-Source of the formula (com.unity.netcode@96783eeffb32, the skeleton's Library/PackageCache):
+Source of the formula (com.unity.netcode@96783eeffb32, the package cache of the Unity test harness):
   Runtime/Snapshot/GhostChunkSerializationState.cs  CalculateSize(serializerDataSize, chunkCapacity) =
       DataPerChunkSize + SnapshotHistorySize * (align16(8 * capacity) + align16(serializerDataSize * capacity))
       DataPerChunkSize = align16(4 * (9 + H + ceil(H / 32)))         -- one such state per (connection, ghost chunk)
@@ -9,7 +9,7 @@ Source of the formula (com.unity.netcode@96783eeffb32, the skeleton's Library/Pa
       + sum over replicated components of align16(component snapshot size)
   Runtime/Variants/GhostTransformVariants.cs  LocalTransform default variant = Position float3 + Scale + Rotation (8 x 4 B)
 
-Walker ghost (the Unity skeleton's walker ghost, not published): LocalTransform, CellCoord (2 int),
+Crowd ghost (the Unity test harness's crowd ghost, not published): LocalTransform, CellCoord (2 int),
 NetPosition (float3), CrowdAction (byte, uint, int, uint, int3, uint), Health (2 int) only when CrowdHealth > 0.
 
     python -I part2/memory-model/memory_model.py
@@ -44,7 +44,7 @@ def per_connection_mb(H, ghosts=GHOSTS, health=False, chunk_capacity=128):
     return chunks * per_chunk / 1e6
 
 
-# measured (part 2 measurement log, rounds 59 and 62): process memory, GB
+# measured (Part 2, authority and replica at 100 connections): process memory, GB
 MEASURED = {
     'authority, 100 direct clients': {32: 4.17, 6: 1.08, 'conns': 100},
     'replica, 100 clients': {32: 4.15, 6: 1.16, 'conns': 100},
@@ -62,7 +62,7 @@ def shared_history_mb(H, conns, ghosts=GHOSTS, health=False, chunk_capacity=128)
 
 def main():
     S = snapshot_size()
-    print(f'walker snapshot size {S} B (+16 with Health) · per ghost per history slot {S + ENTITY_B} B')
+    print(f'crowd ghost snapshot size {S} B (+16 with Health) · per ghost per history slot {S + ENTITY_B} B')
     for H in (32, 16, 6):
         print(f'H={H:>2}: predicted per connection {per_connection_mb(H):6.2f} MB (10,000 ghosts, capacity 128)')
     print()
