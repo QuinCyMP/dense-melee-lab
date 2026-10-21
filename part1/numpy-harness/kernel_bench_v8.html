@@ -1,0 +1,71 @@
+<title>Kernel bench V8</title>
+<pre id="out">running…</pre>
+<script>
+// Scalar JIT (V8 TurboFan) throughput of the same branchless segment–capsule kernel used by
+// dense_melee_bench.py, plus the bounding-sphere prefilter. Data-independent (branchless),
+// so random data in a 2 m cube gives representative timing. Open this file in a Chromium browser.
+"use strict";
+const M = 1 << 16;
+function rngFactory(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+const r = rngFactory(20260916);
+const P = new Float32Array(M * 3), D = new Float32Array(M * 3), Q = new Float32Array(M * 3), E = new Float32Array(M * 3);
+const RC = new Float32Array(M), RB = new Float32Array(M), OUT = new Uint8Array(M);
+for (let i = 0; i < M; i++) {
+  for (let k = 0; k < 3; k++) {
+    P[3*i+k] = r() * 2; D[3*i+k] = r() * 2 - 1; Q[3*i+k] = r() * 2; E[3*i+k] = r() * 0.8 - 0.4;
+  }
+  RC[i] = 0.05 + r() * 0.15; RB[i] = 0.04 + r() * 0.06;
+}
+function kernel(n) {
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const i3 = 3 * i;
+    const px = P[i3], py = P[i3+1], pz = P[i3+2], dx = D[i3], dy = D[i3+1], dz = D[i3+2];
+    const qx = Q[i3], qy = Q[i3+1], qz = Q[i3+2], ex = E[i3], ey = E[i3+1], ez = E[i3+2];
+    const rx = px - qx, ry = py - qy, rz = pz - qz;
+    const a = dx*dx + dy*dy + dz*dz + 1e-8, e = ex*ex + ey*ey + ez*ez + 1e-8;
+    const f = ex*rx + ey*ry + ez*rz, c = dx*rx + dy*ry + dz*rz, b = dx*ex + dy*ey + dz*ez;
+    const den = a*e - b*b;
+    let s = den > 1e-7 ? Math.min(1, Math.max(0, (b*f - c*e) / den)) : 0;
+    const t = Math.min(1, Math.max(0, (b*s + f) / e));
+    s = Math.min(1, Math.max(0, (b*t - c) / a));
+    const cx = rx + dx*s - ex*t, cy = ry + dy*s - ey*t, cz = rz + dz*s - ez*t;
+    const rad = RC[i] + RB[i];
+    const h = (cx*cx + cy*cy + cz*cz <= rad*rad) ? 1 : 0;
+    OUT[i] = h; hits += h;
+  }
+  return hits;
+}
+function sphere(n) {
+  let pass = 0;
+  for (let i = 0; i < n; i++) {
+    const i3 = 3 * i;
+    const dx = D[i3], dy = D[i3+1], dz = D[i3+2], ex = E[i3], ey = E[i3+1], ez = E[i3+2];
+    const sx = P[i3] + 0.5*dx, sy = P[i3+1] + 0.5*dy, sz = P[i3+2] + 0.5*dz;
+    const cx = Q[i3] + 0.5*ex, cy = Q[i3+1] + 0.5*ey, cz = Q[i3+2] + 0.5*ez;
+    const sr = 0.5*Math.sqrt(dx*dx+dy*dy+dz*dz) + RB[i], cr = 0.5*Math.sqrt(ex*ex+ey*ey+ez*ez) + RC[i];
+    const ddx = sx-cx, ddy = sy-cy, ddz = sz-cz, rr = sr + cr;
+    pass += (ddx*ddx + ddy*ddy + ddz*ddz <= rr*rr) ? 1 : 0;
+  }
+  return pass;
+}
+function bench(fn, reps) {
+  for (let w = 0; w < 30; w++) fn(M);          // JIT warm-up
+  const samples = [];
+  for (let k = 0; k < 9; k++) {
+    const t0 = performance.now();
+    for (let rep = 0; rep < reps; rep++) fn(M);
+    const dt = performance.now() - t0;
+    samples.push(dt * 1e6 / (M * reps));
+  }
+  samples.sort((x, y) => x - y);
+  return { min: samples[0], median: samples[4], max: samples[8] };
+}
+setTimeout(() => {
+  const k = bench(kernel, 60), s = bench(sphere, 60);
+  const res = { userAgent: navigator.userAgent, hardwareConcurrency: navigator.hardwareConcurrency, tests_per_rep: M,
+    exact_kernel_ns_per_test: k, sphere_prefilter_ns_per_test: s, hit_fraction: kernel(M) / M };
+  window.results = res;
+  document.getElementById("out").textContent = JSON.stringify(res, null, 1);
+}, 50);
+</script>

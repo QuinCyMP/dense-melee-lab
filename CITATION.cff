@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use these fixtures or results, please cite this repository."
+title: "Dense Melee Lab: single-server limits, a replica tier on Netcode for Entities, and exact many-decider resolution of one fight"
+authors:
+  - name: "QuinCyMP"
+year: 2026
+url: "https://github.com/QuinCyMP/dense-melee-lab"
+license: MIT
+keywords:
+  - netcode
+  - multiplayer
+  - mmo
+  - game server
+  - distributed simulation
+  - determinism
+  - Netcode for Entities
