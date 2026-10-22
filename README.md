@@ -72,6 +72,16 @@ Every fixture writes a JSON per run with the script's SHA-256, the machine, and 
 
 Everything was measured on one desktop (Intel i5-13400F, Windows 11) and once on a rented Linux machine. The Part 3 fixture is Python and numpy, so its absolute times are an upper bound and its exchange cost is mostly interpreter overhead. Deciders talk through shared memory on one machine: no network hop, no jitter, no loss between them. One recorded fight per population and layout. Part 2 ran on thin clients; no human has played through the replica tier. Part 1 has no engine, no rendered client and no human either. Read the Limits section of each document before quoting a number.
 
+## Reproductions
+
+Independent runs of the Part 3 equivalence fixture, checked against the maintainer's machine. The fixture is deterministic, so a real run matches hit counts and cross-hit shares exactly.
+
+| Who | Machine | Python / numpy / scipy | N | Result | Report |
+|---|---|---|---|---|---|
+| @ashwinruke | Intel i5-1135G7 laptop, Windows 11 | 3.14.7 / 2.5.4 / 1.18.1 | 2,000 | matches: equivalence 0 at delay 0 for D = 2, 4, 8; divergence at delay 1 and 2 as documented | [#11](https://github.com/QuinCyMP/dense-melee-lab/issues/11) |
+
+Add yours through the Reproduction report issue template; see [#1](https://github.com/QuinCyMP/dense-melee-lab/issues/1).
+
 ## Contributing
 
 Reproduce a run on your hardware and post the summary line. That is the most useful contribution and it is the first issue. Then see [CONTRIBUTING.md](CONTRIBUTING.md) and the open issues for a real UDP hop between deciders, a native port of the fixture kernel, plots and CI.
