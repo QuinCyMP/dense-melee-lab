@@ -86,6 +86,10 @@ Add yours through the Reproduction report issue template; see [#1](https://githu
 
 Reproduce a run on your hardware and post the summary line. That is the most useful contribution and it is the first issue. Then see [CONTRIBUTING.md](CONTRIBUTING.md) and the open issues for a real UDP hop between deciders, a native port of the fixture kernel, plots and CI.
 
+## Related
+
+[QuinCyMP-GDD](https://github.com/QuinCyMP/QuinCyMP-GDD) is an agent skill for writing game design documents, by the same author. The fixtures here answer the server-capacity questions that a document of that kind raises in its MMO systems section.
+
 ## Citation
 
 ```bibtex
