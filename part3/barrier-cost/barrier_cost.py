@@ -70,18 +70,23 @@ SNAP = np.dtype([('id', '<i4'), ('x', '<f8'), ('y', '<f8'), ('yaw', 'u1'), ('act
 CAND = np.dtype([('a', '<i4'), ('tg', '<i4'), ('sw', '<i4'), ('hp', '<i4')])                          # 16 B hit candidate
 PDK = np.dtype('<i8')                                                                                 # 8 B dedupe key
 HM_ATK = b.SWING_REACH + 3.0           # attacker snapshots go to a neighbour whose band is closer than this (reach + drift)
-BUCKETS = ['in', 'pack1', 'w1', 'unpack1', 'crowd', 'pack2', 'w2', 'unpack2', 'sweep', 'seq', 'seqc', 'w3', 'w4', 'apply']
+BUCKETS = ['in', 'pack1', 'w1', 'unpack1', 'crowd', 'pack2', 'w2', 'unpack2', 'sweep', 'seq', 'seqc', 'w3', 'w4', 'apply', 'census']
 BI = {k: i for i, k in enumerate(BUCKETS)}
 NB = len(BUCKETS)
-# which buckets form the four reported classes
-CLASS = dict(compute=['in', 'crowd', 'sweep', 'apply'], exchange=['pack1', 'unpack1', 'pack2', 'unpack2'],
+# which buckets form the four reported classes ('census' is non-zero only with --recut-thr)
+CLASS = dict(compute=['in', 'crowd', 'sweep', 'apply'], exchange=['pack1', 'unpack1', 'pack2', 'unpack2', 'census'],
              barrier=['w1', 'w2', 'w3', 'w4'], sequencer=['seq', 'seqc'])
 CAPS = dict(hand=8192, pd=1 << 16, cand=1 << 16)
+# per-tick counters of one decider
+NC = 14
+C_HELD, C_OWNED, C_HALO_IN, C_HAND_IN, C_SNAP_IN, C_HITS, C_CROSS, C_MSGS, C_BYTES, C_PAIRS = range(10)
+C_RECUT, C_HAND_OUT, C_PD_OUT, C_CENSUS_B = 10, 11, 12, 13
 
 
 # ----------------------------------------------------------------------------- shared memory layout
-def layout(N, D):
-    """byte offsets: 4 barrier counters, then for every ordered pair (src, dst) one mailbox per phase"""
+def layout(N, D, bins=0):
+    """byte offsets: 4 barrier counters, then for every ordered pair (src, dst) one mailbox per phase, then (re-cut only)
+    two census slots per decider, alternating by tick parity: owned-alive count + y histogram of the owned bodies"""
     cap_h = cap_s = N
     off = {}
     pos = 0
@@ -95,9 +100,45 @@ def layout(N, D):
     box3 = (box3 + 63) // 64 * 64
     off['p1'], off['p2'], off['p3'] = pos, pos + D * D * box, pos + D * D * (box + box2)
     off['box'], off['box2'], off['box3'] = box, box2, box3
-    off['size'] = off['p3'] + D * D * box3
+    off['census'] = off['p3'] + D * D * box3
+    off['cslot'] = (64 + bins * 4 + 63) // 64 * 64
+    off['bins'] = bins
+    off['size'] = off['census'] + (2 * D * off['cslot'] if bins else 0)
     off['cap_h'], off['cap_s'] = cap_h, cap_s
     return off
+
+
+class Census:
+    """numpy views of the census slots: slot (parity, decider) = int64 header [owned alive] + int32 histogram"""
+
+    def __init__(self, buf, off, D):
+        self.n, self.h = {}, {}
+        for par in (0, 1):
+            for d in range(D):
+                o = off['census'] + (par * D + d) * off['cslot']
+                self.n[par, d] = np.ndarray((1,), '<i8', buf, o)
+                self.h[par, d] = np.ndarray((off['bins'],), '<i4', buf, o + 64)
+
+
+def band_geom(cuts):
+    return np.r_[-np.inf, cuts], np.r_[cuts, np.inf]
+
+
+def neighbours(me, D, ylo, yhi, reach):
+    """deciders whose band is closer than the farthest reach of an exchange (halo or attacker snapshot)"""
+    return [e for e in range(D) if e != me and max(0.0, ylo[e] - yhi[me], ylo[me] - yhi[e]) < reach]
+
+
+def recut_cuts(hist, D, R):
+    """equal-population cuts on y from the summed census histogram over [-R, R], linear inside a bin. Every decider
+    runs this on the same integers, so all of them get the same cuts bit for bit."""
+    bins = len(hist)
+    cum = np.cumsum(hist)
+    q = cum[-1] * np.arange(1, D) / D
+    j = np.minimum(np.searchsorted(cum, q), bins - 1)
+    prev = np.where(j > 0, cum[np.maximum(j - 1, 0)], 0)
+    frac = np.where(hist[j] > 0, (q - prev) / np.maximum(hist[j], 1), 0.0)
+    return np.maximum.accumulate(-R + (j + frac) * (2 * R / bins))
 
 
 class Mail:
@@ -173,18 +214,25 @@ def decider(me, a, shm_name, conn, start_bar):
     swoff = np.searchsorted(sw[:, 0], np.arange(0, T + 3))
     ref = b.load_ref(cache / (key + '_L0'))
     shm = shared_memory.SharedMemory(name=shm_name)
-    off = layout(N, D)
+    rc_thr, rc_bins, rc_cool, rc_neg = a['recut_thr'], a['recut_bins'], a['recut_cooldown'], a['recut_neg']
+    rc_on = rc_thr > 0 and D > 1
+    off = layout(N, D, rc_bins if rc_on else 0)
     buf = shm.buf
     others = [e for e in range(D) if e != me]
     if D > 1:
-        cuts, ylo, yhi, cen, crad = world.bands(D)
-        # neighbours: deciders whose band is closer than the farthest reach of an exchange (halo or attacker snapshot)
-        nbrs = [e for e in others if max(0.0, ylo[e] - yhi[me], ylo[me] - yhi[e]) < max(vm, hm)]
+        cuts, _ylo, _yhi, cen, crad = world.bands(D)
+        ylo, yhi = band_geom(cuts)
+        nbrs = neighbours(me, D, ylo, yhi, max(vm, hm))
     else:
+        cuts = np.empty(0)
         nbrs = []
     peers = nbrs if a['barrier'] == 'neighbor' else None
     bars = [Spin(buf, off['flags'] + i * D * 64, D, me, peers if i < 2 else None) for i in range(4)]
     mail = {(s, d): Mail(buf, off, D, s, d) for s in range(D) for d in range(D) if s != d}
+    cen_v = Census(buf, off, D) if rc_on else None
+    pending = None                                  # (tick the new cuts take effect, cuts)
+    last_recut = 0
+    recuts = []                                     # (decided at tick, effective tick, imbalance max/mean, owned counts)
     px, py = world.px0.copy(), world.py0.copy()
     hp = np.full(N, b.HP0, np.int64)
     act = np.full(N, -1000, np.int64)
@@ -193,7 +241,7 @@ def decider(me, a, shm_name, conn, start_bar):
     H = np.nonzero((np.searchsorted(cuts, py) if D > 1 else np.zeros(N, np.int64)) == me)[0].astype(np.int64)
     ser = np.zeros((T + 1, NB), np.float32)         # ms per bucket
     tot = np.zeros(T + 1, np.float32)               # whole tick, ms (verify excluded)
-    cnt = np.zeros((T + 1, 10), np.int64)           # held, owned, halo_in, hand_in, snap_in, hits, cross_hits, msgs_out, bytes_out, pairs
+    cnt = np.zeros((T + 1, NC), np.int64)           # see the C_* columns
     ver = dict(pos_bad=0, hp_bad=0, pos_max=0.0, checked=0, first_bad=-1)
     hits_acc, deaths = [], []
     DMG, FR, WU, AC = b.DMG, b.FRAMES, b.WINDUP, b.ACTIVE
@@ -211,6 +259,17 @@ def decider(me, a, shm_name, conn, start_bar):
             n = pc()
             sec[BI[name]] += (n - tk) / 1e6
             tk = n
+
+        # ---- 0. a re-cut decided last tick takes effect: new bands; this tick every decider exchanges with every other,
+        #         because a body can be handed to a band that is not a neighbour of the band it left
+        recut_now = pending is not None and pending[0] == t
+        if recut_now:
+            cuts = pending[1]
+            ylo, yhi = band_geom(cuts)
+            nbrs = neighbours(me, D, ylo, yhi, max(vm, hm))
+            pending = None
+            c[C_RECUT] = 1
+        pt = others if recut_now else nbrs
 
         # ---- 1. input, swing intents, move of every held body
         mxq, myq, yq = mx[t][H], my[t][H], yqa[t][H]
@@ -246,8 +305,8 @@ def decider(me, a, shm_name, conn, start_bar):
             nmsg = 0
             pdk_tg = (pd // b.KEY_SW) % N if pd.size else pd
             drop_pd = np.zeros(pd.size, bool)
-            assert np.isin(ob, [me] + nbrs).all(), 'a body moved past the neighbour band'
-            for e in nbrs:
+            assert recut_now or np.isin(ob, [me] + nbrs).all(), 'a body moved past the neighbour band'
+            for e in pt:
                 mb = mail[(me, e)]
                 mh = ob == e
                 mo = (~mh) & (mvy >= ylo[e] - vm) & (mvy <= yhi[e] + vm)
@@ -259,21 +318,37 @@ def decider(me, a, shm_name, conn, start_bar):
                 ids2 = H[mh]
                 hh['id'], hh['x'], hh['y'] = ids2, mvx[mh], mvy[mh]
                 hh['act'], hh['yaw'], hh['hp'] = act[ids2], yawi[ids2], hp[ids2]
-                if n2 and pd.size:
+                if n2 and pd.size and not (recut_now and rc_neg):     # negative control: a re-cut that drops the dedupe keys
                     mp_ = np.isin(pdk_tg, ids2)
                     n3 = int(mp_.sum())
+                    assert n3 <= CAPS['pd'], 'dedupe mailbox overflow'
                     mb.pd[:n3] = pd[mp_]
-                    drop_pd |= mp_
                 else:
                     n3 = 0
                 mb.hdr1[0], mb.hdr1[1], mb.hdr1[2] = n1, n2, n3
                 nbytes += n1 * H1.itemsize + n2 * HAND.itemsize + n3 * 8
                 nmsg += int(n1 > 0 or n2 > 0 or n3 > 0)
+                c[C_HAND_OUT] += n2
+                c[C_PD_OUT] += n3
             if drop_pd.any():
                 pd = pd[~drop_pd]
             lap('pack1')
             bars[0].wait(t)
             lap('w1')
+            # ---- census read: every decider wrote its owned-alive count and histogram at the end of tick t-1, before
+            #      barrier 1 of tick t, so all deciders read the same census here and take the same decision
+            if rc_on and t >= 2 and pending is None and t - last_recut >= rc_cool:
+                par = (t - 1) % 2
+                ns_ = np.array([int(cen_v.n[par, d][0]) for d in range(D)], np.int64)
+                imb = float(ns_.max()) / max(float(ns_.mean()), 1.0)
+                if imb > rc_thr:
+                    hs_ = np.zeros(off['bins'], np.int64)
+                    for d in range(D):
+                        hs_ += cen_v.h[par, d]
+                    pending = (t + 1, recut_cuts(hs_, D, R))
+                    last_recut = t + 1
+                    recuts.append(dict(decided=t, effective=t + 1, imbalance=round(imb, 4), owned=ns_.tolist()))
+                lap('census')
             # ---- 3. read 1
             own_ids = [H[mine]]
             own_x, own_y = [mvx[mine]], [mvy[mine]]
@@ -281,7 +356,7 @@ def decider(me, a, shm_name, conn, start_bar):
             f_ids, f_x, f_y = [H[mo_me]], [mvx[mo_me]], [mvy[mo_me]]
             new_pd = []
             nh = nhd = 0
-            for s in nbrs:
+            for s in pt:
                 mb = mail[(s, me)]
                 n1, n2, n3 = int(mb.hdr1[0]), int(mb.hdr1[1]), int(mb.hdr1[2])
                 if n1:
@@ -320,7 +395,7 @@ def decider(me, a, shm_name, conn, start_bar):
         if D > 1:
             # ---- publish 2
             ay_ = py[Aloc]
-            for e in nbrs:
+            for e in pt:
                 mb = mail[(me, e)]
                 m = (ay_ >= ylo[e] - hm) & (ay_ <= yhi[e] + hm)
                 n1 = int(m.sum())
@@ -336,7 +411,7 @@ def decider(me, a, shm_name, conn, start_bar):
             lap('w2')
             s_ids, s_x, s_y, s_yaw, s_act = [Aloc], [px[Aloc]], [py[Aloc]], [yawi[Aloc]], [act[Aloc]]
             ns = 0
-            for s in nbrs:
+            for s in pt:
                 mb = mail[(s, me)]
                 n1 = int(mb.hdr2[0])
                 if n1:
@@ -426,6 +501,14 @@ def decider(me, a, shm_name, conn, start_bar):
             deaths.append(np.column_stack([dead, np.full(len(dead), t)]))
         lap('apply')
         H_next = O[hp[O] > 0]
+        if rc_on:
+            # ---- census write: owned-alive count and y histogram over [-R, R] for the re-cut decision of the next tick
+            par = t % 2
+            yb = np.clip(((py[H_next] + R) * (rc_bins / (2 * R))).astype(np.int64), 0, rc_bins - 1)
+            cen_v.h[par, me][:] = np.bincount(yb, minlength=rc_bins)
+            cen_v.n[par, me][0] = len(H_next)
+            c[C_CENSUS_B] = 8 + rc_bins * 4
+            lap('census')
         c[1] = len(O)
         c[7], c[8] = nmsg if D > 1 else 0, nbytes if D > 1 else 0
         ser[t] = sec
@@ -447,10 +530,10 @@ def decider(me, a, shm_name, conn, start_bar):
     wall = time.perf_counter() - t_wall0
     hits = np.concatenate(hits_acc) if hits_acc else np.empty((0, 6), np.int64)
     dth = np.concatenate(deaths) if deaths else np.empty((0, 2), np.int64)
-    conn.send(dict(me=me, ser=ser, tot=tot, cnt=cnt, ver=ver, hits=hits, deaths=dth, wall=wall, final_hp=hp, N=N))
+    conn.send(dict(me=me, ser=ser, tot=tot, cnt=cnt, ver=ver, hits=hits, deaths=dth, wall=wall, final_hp=hp, N=N, recuts=recuts))
     conn.close()
     try:
-        del bars, mail
+        del bars, mail, cen_v
         shm.close()
     except BufferError:
         pass
@@ -466,7 +549,15 @@ def harness_running():
 
 
 def sys_times():
-    """(idle, kernel, user) 100 ns ticks of the whole machine (kernel includes idle)"""
+    """(idle, kernel, user) ticks of the whole machine (kernel includes idle). Windows: GetSystemTimes; Linux: /proc/stat"""
+    if os.name != 'nt':
+        try:
+            f = [int(x) for x in Path('/proc/stat').read_text().split('\n', 1)[0].split()[1:9]]
+            user, nice, system, idle, iowait, irq, softirq, steal = f
+            idle_all = idle + iowait
+            return idle_all, system + irq + softirq + steal + idle_all, user + nice
+        except (OSError, ValueError):
+            return 0, 0, 0
     import ctypes
     from ctypes import wintypes
     i, k, u = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
@@ -474,6 +565,22 @@ def sys_times():
     f = lambda x: (x.dwHighDateTime << 32) | x.dwLowDateTime
     return f(i), f(k), f(u)
 
+def sha256(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+def cpu_name():
+    try:
+        if os.name == 'nt':
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'HARDWARE\DESCRIPTION\System\CentralProcessor\0') as k:
+                return winreg.QueryValueEx(k, 'ProcessorNameString')[0].strip()
+        for line in Path('/proc/cpuinfo').read_text().splitlines():
+            if line.startswith('model name'):
+                return line.split(':', 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor()
 
 def busy_pct(a, b_):
     di, dk, du = b_[0] - a[0], b_[1] - a[1], b_[2] - a[2]
@@ -486,8 +593,12 @@ def pct(v, q):
     return round(float(np.percentile(v, q)), 4) if len(v) else 0.0
 
 
-def run_config(N, D, T, halo=3.0, seq='merge', verify=True, tag='', force=False, barrier='global'):
-    name = f'n{N}_D{D}_t{T}_h{halo:g}_{seq}' + ('' if verify else '_nov') + ('' if barrier == 'global' else '_nb') + (f'_{tag}' if tag else '')
+def run_config(N, D, T, halo=3.0, seq='merge', verify=True, tag='', force=False, barrier='global',
+               recut_thr=0.0, recut_bins=1024, recut_cooldown=150, recut_neg=False):
+    rc = recut_thr > 0 and D > 1
+    assert not (rc and barrier != 'global'), 'the re-cut census needs the global barrier'
+    name = (f'n{N}_D{D}_t{T}_h{halo:g}_{seq}' + ('' if verify else '_nov') + ('' if barrier == 'global' else '_nb') +
+            (f'_rc{recut_thr:g}' if rc else '') + (f'_{tag}' if tag else '') + ('_neg' if rc and recut_neg else ''))
     path = RAW / (name + '.json')
     if path.exists() and not force:
         return json.loads(path.read_text())['summary']
@@ -497,12 +608,13 @@ def run_config(N, D, T, halo=3.0, seq='merge', verify=True, tag='', force=False,
         return dict(name=name, skipped='Harness running')
     from multiprocessing import shared_memory
     ctx = mp.get_context('spawn')
-    off = layout(N, D)
+    off = layout(N, D, recut_bins if rc else 0)
     shm = shared_memory.SharedMemory(create=True, size=off['size'])
     shm.buf[:off['flags'] + 4 * D * 64] = bytes(4 * D * 64 + off['flags'])
     start_bar = ctx.Barrier(D)
     st0 = sys_times()
-    a = dict(N=N, T=T, D=D, halo=halo, seq=seq, verify=verify, cache=str(CACHE), barrier=barrier)
+    a = dict(N=N, T=T, D=D, halo=halo, seq=seq, verify=verify, cache=str(CACHE), barrier=barrier,
+             recut_thr=recut_thr if rc else 0.0, recut_bins=recut_bins, recut_cooldown=recut_cooldown, recut_neg=recut_neg)
     procs, conns = [], []
     for me in range(D):
         pr, ch = ctx.Pipe(duplex=False)
@@ -582,17 +694,53 @@ def run_config(N, D, T, halo=3.0, seq='merge', verify=True, tag='', force=False,
                                owned_p50=pct(cnt[i, :, 1], 50)) for i in range(D)]
     out['alive_start_p50_total'] = pct(cnt[:, :, 0].sum(axis=0), 50)
     out['equivalence'] = equiv
+    # --- band re-cut: one row per re-cut, the re-cut tick against the 30 ticks before the decision
+    cnt_f = np.stack([r['cnt'] for r in res])                  # (D, T+1, NC), all ticks
+    tick_f = np.stack([r['tot'] for r in res]).max(axis=0)     # slowest decider, ms
+    by_f = cnt_f[:, :, C_BYTES].sum(axis=0)
+    hand_f = cnt_f[:, :, C_HAND_OUT].sum(axis=0)
+    own_f = cnt_f[:, :, C_OWNED]
+    imb_f = own_f.max(axis=0) / np.maximum(own_f.mean(axis=0), 1)
+    out['owned_imbalance_max_over_mean'] = dict(p50=pct(imb_f[W + 1:], 50), max=round(float(imb_f[W + 1:].max()), 4),
+                                                last=round(float(imb_f[-1]), 4))
+    if rc:
+        decs = res[0]['recuts']
+        assert all(r['recuts'] == decs for r in res), 'deciders disagree on the re-cut'
+        rows = []
+        for x in decs:
+            te = x['effective']
+            if te > T:
+                continue
+            w0 = slice(max(W + 1, x['decided'] - 30), x['decided'])
+            rows.append(dict(decided=x['decided'], effective=te, imbalance_decided=x['imbalance'],
+                             imbalance_before=round(float(imb_f[te - 1]), 4), imbalance_after=round(float(imb_f[te]), 4),
+                             bodies_handed_over=int(hand_f[te]), handed_over_per_tick_before_p50=pct(hand_f[w0], 50),
+                             dedupe_keys_handed_over=int(cnt_f[:, te, C_PD_OUT].sum()),
+                             bytes_recut_tick=int(by_f[te]), bytes_before_p50=pct(by_f[w0], 50),
+                             tick_ms_recut=round(float(tick_f[te]), 3), tick_ms_next=round(float(tick_f[te + 1]), 3) if te < T else None,
+                             tick_ms_before_p50=pct(tick_f[w0], 50), tick_ms_before_max=round(float(tick_f[w0].max()), 3),
+                             census_bytes_per_tick_all=int(cnt_f[:, te, C_CENSUS_B].sum())))
+        out['recut'] = dict(threshold=recut_thr, bins=recut_bins, cooldown=recut_cooldown, negative_control=recut_neg, events=rows)
     out['host'] = dict(python=platform.python_version(), numpy=np.__version__, machine=platform.platform(), cpu_count=os.cpu_count(),
+                       cpu=cpu_name(), oversubscribed=D > (os.cpu_count() or 1),
                        date=datetime.now(timezone.utc).isoformat(timespec='seconds'))
+    out['script_sha256'] = sha256(Path(__file__))
+    out['sim_sha256'] = sha256(Path(b.__file__))
     series = dict(tick_sys_ms=np.round(tot.max(axis=0), 3).tolist(), bytes=by.tolist(),
                   compute_mean_ms=np.round(cls['compute'].mean(axis=0), 3).tolist(), barrier_mean_ms=np.round(cls['barrier'].mean(axis=0), 3).tolist(),
-                  owned_total=cnt[:, :, 0].sum(axis=0).tolist())
+                  owned_total=cnt[:, :, 0].sum(axis=0).tolist(), owned_imbalance=np.round(imb_f[W + 1:], 4).tolist(),
+                  handed_over=hand_f[W + 1:].tolist())
     path.write_text('{\n"summary": ' + json.dumps(out, indent=1) + ',\n"series": {\n' +
                     ',\n'.join(f'"{k}": ' + json.dumps(v, separators=(',', ':')) for k, v in series.items()) + '\n}\n}\n')
     tag_ok = 'EQUIV 0' if equiv['zero'] else ('equiv NOT 0' if verify else 'unverified')
     print(f'[{name}] tick p50 {out["tick_ms"]["p50"]} p99 {out["tick_ms"]["p99"]} ms | compute {out["compute_ms"]["p50"]} '
           f'exch {out["exchange_ms"]["p50"]} barrier {out["barrier_ms"]["p50"]} seq {out["sequencer_ms"]["p50"]} | '
           f'{out["bytes_per_tick"]["p50"]:.0f} B/tick | {tag_ok} | wall {out["wall_s"]} s', flush=True)
+    for x in out.get('recut', {}).get('events', []):
+        print(f'  re-cut at tick {x["effective"]} (imbalance {x["imbalance_decided"]} -> {x["imbalance_after"]}): '
+              f'{x["bodies_handed_over"]} bodies + {x["dedupe_keys_handed_over"]} dedupe keys handed over, '
+              f'{x["bytes_recut_tick"]} B (before p50 {x["bytes_before_p50"]:.0f}), tick {x["tick_ms_recut"]} ms '
+              f'(before p50 {x["tick_ms_before_p50"]}, max {x["tick_ms_before_max"]})', flush=True)
     return out
 
 
@@ -821,7 +969,7 @@ def load_runs(gated=True):
     g = {}
     for p in sorted(RAW.glob('n*.json')):
         s = json.loads(p.read_text())['summary']
-        if s.get('skipped') or s['name'].endswith('_neg'):
+        if s.get('skipped') or s['name'].endswith('_neg') or 'recut' in s:
             continue
         if gated and not is_gated(s['name']):
             continue
@@ -875,7 +1023,7 @@ def summarize():
         if not base:
             continue
         t1, t1p = med([x['tick_ms']['p50'] for x in base]), med([x['tick_ms']['p99'] for x in base])
-        for D in (2, 4, 8):
+        for D in (2, 4, 8, 16, 32):
             r = g.get((N, D, 'merge', 3.0, True, 'global'))
             if not r:
                 continue
@@ -921,6 +1069,29 @@ def summarize():
                 continue
             print(f'| {x["D"]} | {x["kind"]} | {x["rows_halo"]} / {x["rows_snap"]} | {x["payload_bytes_per_pair_per_tick"]} | {x["tick_ms"]["p50"]:.3f} | {x["tick_ms"]["p99"]:.3f} | '
                   f'{x["per_exchange_point_ms_p50"]:.3f} | {x.get("wait_ms_both_barriers", {}).get("p50", "-")} |')
+    rc_runs = []
+    for p in sorted(RAW.glob('n*_rc*.json')):
+        s = json.loads(p.read_text())['summary']
+        if 'recut' in s:
+            rc_runs.append(s)
+    if rc_runs:
+        print()
+        print('## Table 7 - band re-cut under load (every run, negative controls included); before = the 30 ticks before the decision')
+        print('| run | D | re-cut tick | imbalance decided -> after | bodies handed over (before p50/tick) | dedupe keys | bytes on the tick (before p50) | '
+              'tick ms on the tick / next (before p50, max) | equivalence 0 | oversubscribed |')
+        print('|---|---|---|---|---|---|---|---|---|---|')
+        for s in rc_runs:
+            ev = s['recut']['events'] or [None]
+            for x in ev:
+                eq = 'yes' if s['equivalence']['zero'] else 'NO'
+                os_ = s['host'].get('oversubscribed', '-')
+                if x is None:
+                    print(f'| {s["name"]} | {s["D"]} | none (imbalance max {s["owned_imbalance_max_over_mean"]["max"]}) | | | | | | {eq} | {os_} |')
+                    continue
+                print(f'| {s["name"]} | {s["D"]} | {x["effective"]} | {x["imbalance_decided"]} -> {x["imbalance_after"]} | '
+                      f'{x["bodies_handed_over"]} ({x["handed_over_per_tick_before_p50"]:.0f}) | {x["dedupe_keys_handed_over"]} | '
+                      f'{x["bytes_recut_tick"]} ({x["bytes_before_p50"]:.0f}) | {x["tick_ms_recut"]} / {x["tick_ms_next"]} '
+                      f'({x["tick_ms_before_p50"]}, {x["tick_ms_before_max"]}) | {eq} | {os_} |')            
     f6 = RAW / 'feed_merge.json'
     if f6.exists():
         print()
@@ -967,6 +1138,11 @@ def main():
     ap.add_argument('--trim', action='store_true')
     ap.add_argument('--prepare', action='store_true')
     ap.add_argument('--summarize', action='store_true')
+    ap.add_argument('--recut-thr', type=float, default=0.0,
+                    help='re-cut the bands when owned-alive max/mean across deciders passes this (0 = fixed bands)')
+    ap.add_argument('--recut-bins', type=int, default=1024, help='y histogram bins of the re-cut census')
+    ap.add_argument('--recut-cooldown', type=int, default=150, help='ticks between two re-cuts')
+    ap.add_argument('--recut-neg', action='store_true', help='negative control: the re-cut hand-over drops the dedupe keys')
     args = ap.parse_args()
     RAW.mkdir(exist_ok=True)
     if args.summarize:
@@ -999,7 +1175,8 @@ def main():
         return
     b.prepare(args.n, 'front', args.ticks, b.HP0, CACHE, [0])
     for D in [int(x) for x in args.deciders.split(',')]:
-        run_config(args.n, D, args.ticks, args.halo, args.seq, not args.no_verify, args.tag, args.force, args.barrier)
+        run_config(args.n, D, args.ticks, args.halo, args.seq, not args.no_verify, args.tag, args.force, args.barrier,
+                   args.recut_thr, args.recut_bins, args.recut_cooldown, args.recut_neg)
 
 
 if __name__ == '__main__':
